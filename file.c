@@ -25,7 +25,7 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
 #include "variable.h"
 #include "debug.h"
 #include "hash.h"
-
+#include "md5.h"
 
 /* Remember whether snap_deps has been invoked: we need this to be sure we
    don't add new rules (via $(eval ...)) afterwards.  In the future it would
@@ -199,8 +199,138 @@ enter_file (const char *name)
       f->last = new;
     }
 
+  if (use_checksum)
+    {
+      check_renamed(new);
+      read_checksum (new, new->last_checksum);
+    }
+
   return new;
 }
+
+static void
+_mkdir(const char *dir)
+{
+  char tmp[256];
+  char *p = NULL;
+  size_t len;
+
+  if ((-1 == mkdir (dir, S_IRWXU)) && (EEXIST == errno))
+    {
+      return;
+    }
+  
+  snprintf (tmp, sizeof(tmp),"%s",dir);
+  len = strlen (tmp);
+  if(tmp[len - 1] == '/')
+    tmp[len - 1] = 0;
+  for(p = tmp + 1; *p; p++)
+    if(*p == '/')
+      {
+        *p = 0;
+        mkdir (tmp, S_IRWXU);
+        *p = '/';
+      }
+  mkdir (tmp, S_IRWXU);
+}
+
+static char *
+_basepath(const char *file)
+{
+  int i = 0;
+  int loc = -1;
+  char *ret = NULL;
+  while (file[i] != '\0') {
+    if (file[i] == '/') {
+      loc = i;
+    }
+    ++i;
+  }
+
+  if (-1 != loc) {
+    ret = (char *) xmalloc (loc + 1);
+    memcpy(ret, file, loc);
+    ret[loc] = '\0';
+  }
+  return ret;
+}
+
+/* Get the checksum file name. Compute lazily when it is needed.  */
+static char *
+_checksum_fn(struct file *new)
+{
+  if (0 == strlen(new->checksum_fn))
+    {
+      unsigned loc = 0;
+      while (0 == strncmp("../", &(new->name[loc]), strlen("../")))
+        {
+          loc += strlen("../");
+        }
+      sprintf (new->checksum_fn, "%s/%s.checksum",
+               use_checksum, &(new->name[loc]));
+    }
+  return new->checksum_fn;
+}
+
+/* Compute the checksum for the file.  */
+void
+compute_checksum(struct file *new, void * checksum)
+{
+  FILE *f;
+  char buffer[1024];
+  struct md5_ctx ctx;
+
+  md5_init_ctx (&ctx);
+
+  f = fopen (new->name, "rb");
+  if (f != NULL)
+    {
+      int bytes;
+      while (!ferror (f) && !feof (f)) {
+        bytes = fread (buffer, 1, 1024, f);
+        md5_process_bytes (buffer, bytes, &ctx);
+      }
+      fclose (f);
+      md5_finish_ctx (&ctx, checksum);
+    }
+}
+
+void
+read_checksum(struct file *new, void * checksum)
+{
+  FILE *f;
+  char * checksum_file = _checksum_fn(new);
+
+  f = fopen (checksum_file, "rb");
+  if (f != NULL)
+    {
+      if (0 == fread (checksum, 1, 16, f))
+        {
+          checksum = 0;
+        }
+      fclose (f);
+    }
+}
+
+void
+write_checksum(struct file *new)
+{
+  FILE *f;
+  char * basepath;
+  char * checksum_file = _checksum_fn(new);
+
+  basepath = _basepath (checksum_file);
+  _mkdir (basepath);
+  free (basepath);
+
+  f = fopen (checksum_file, "wb");
+  if (f != NULL)
+    {
+      fwrite (new->checksum, 1, 16, f);
+      fclose (f);
+    }
+}
+
 
 /* Rehash FILE to NAME.  This is not as simple as resetting
    the 'hname' member, since it must be put in a new hash bucket,
